@@ -1,0 +1,12 @@
+# copy this file to configs/local.yaml (gitignored) and edit as needed.
+# anything set here overrides the packaged defaults in src/quantloom/config/default.yaml.
+#
+# note that data ingestion requires the ALPACA_API_KEY and ALPACA_SECRET_KEY environment variables.
+# Alpaca API keys require a free account.
+#
+# data_dir defaults to "./sample_data" and generally doesn't need overriding
+# - it's small (tens of MB for the default universe/date range) and fully regenerable from Alpaca
+# Only point it elsewhere if you're scaling to a much larger
+# universe/history and want it on a disk with more room (for example, data_dir: "D:/quant-data/quantloom")
+#
+# see docs/CONFIGURATION.md for more details (custom strategies, grid search, etc.)

@@ -1,0 +1,123 @@
+# Packaged defaults. Do not put machine-specific settings (like data_dir) here directly --
+# copy configs/local.example.yaml -> configs/local.yaml (gitignored) and override there instead.
+#
+# See docs/CONFIGURATION.md for valid value lists, recommended ranges, and worked examples for
+# the settings below that aren't self-explanatory from their name alone.
+
+data_dir: "./sample_data"
+
+directions: [long]
+
+universe:
+  equity: stocks
+  stock_number: 25
+  candle_length: "1h"
+  start_date: "2021-01-01"
+  train_test_split_date: "2025-01-01"
+  end_date: "2025-12-31"
+  refresh_data: false
+
+indicators:
+  rsi_length: 12
+  stochastic_fastk_period: 5
+  stochastic_slowk_period: 3
+  stochastic_slowd_period: 3
+
+extrema:
+  divergence_first: { before: 5, after: 5 }
+  divergence_second: { before: 5, after: 1 }
+  support_resistance: { before: 8, after: 8 }
+
+divergence:
+  expiration_bars: 30
+
+stochastic_crossover:
+  extreme_threshold: 50.0
+  cross_level: { flexible: true, value: 10.0 }
+  expiration_bars: 10
+
+default_strategy:
+  buy_signal_order: [["rsi_divergence"]]
+  buy_signal_expiration_bars: []
+  sell_rule_groups:
+    - - kind: indicator
+        indicator: rsi
+        threshold: { flexible: false, value: 50.0 }
+    - - kind: margin
+        take_profit_multiplier: 2.0
+        stop_loss_multiplier: 2.0
+        volatility_length: 30
+        take_profit_triggers_on_high: true
+    - - kind: support_resistance
+        resistance_min_distance: 1.0
+        support_min_distance: 1.0
+        resistance_triggers_on_high: true
+    - - kind: time
+        max_bars_held: 60
+
+strategies:
+  momentum_divergence:
+    buy_signal_order: [["rsi_divergence"], ["stochastic_crossover"]]
+    buy_signal_expiration_bars: [8]
+    sell_rule_groups:
+      - - kind: indicator
+      - - kind: time
+
+  range_scalp_divergence:
+    sell_rule_groups:
+      - - kind: support_resistance
+      - - kind: time
+
+  fast_divergence:
+    sell_rule_groups:
+      - - kind: indicator
+      - - kind: margin
+      - - kind: support_resistance
+      - - kind: time
+          max_bars_held: 30
+
+  divergence_candlestick_confirmation:
+    buy_signal_order: [["rsi_divergence"], ["candle sticks"]]
+    buy_signal_expiration_bars: [8]
+    sell_rule_groups:
+      - - kind: margin
+      - - kind: support_resistance
+      - - kind: time
+
+  divergence_candlestick_confluence:
+    buy_signal_order: [["rsi_divergence", "candle sticks"]]
+    buy_signal_expiration_bars: [6]
+    sell_rule_groups:
+      - - kind: margin
+      - - kind: support_resistance
+      - - kind: time
+
+  triple_confirmation:
+    buy_signal_order: [["rsi_divergence"], ["stochastic_crossover"], ["candle sticks"]]
+    buy_signal_expiration_bars: [8, 10]
+    sell_rule_groups:
+      - - kind: indicator
+        - kind: support_resistance
+      - - kind: margin
+      - - kind: time
+
+strategy: momentum_divergence
+
+position_sizing:
+  max_positions: 4
+  reject_correlated_entries: true
+  correlation_reject_threshold: 0
+  correlation_lookback_bars: 60
+
+risk:
+  portfolio_warmup_bars: 15
+  risk_free_rate: 0.04
+  simulate_profit_odds: true
+  monte_carlo_paths: 10000
+  holding_period_hours: 2016
+  calculate_spy_correlation: true
+
+grid:
+  rsi_length: [4, 12, 48]
+  strategy: [momentum_divergence, range_scalp_divergence]
+  position_sizing.correlation_reject_threshold: [0, 0.15, 0.3, 0.45]
