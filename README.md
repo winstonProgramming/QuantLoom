@@ -28,6 +28,9 @@ built in from the start.
 - [Configuration overview](#configuration-overview)
 - [Installation and usage](#installation-and-usage)
 - [Data: starter dataset and generating your own](#data-starter-dataset-and-generating-your-own)
+- [Retry behavior and exponential backoff](#retry-behavior-and-exponential-backoff)
+- [Logging](#logging)
+- [Development: type checking, linting, and tests](#development-type-checking-linting-and-tests)
 - [Libraries used](#libraries-used)
 - [Market hours coverage](#market-hours-coverage)
 - [The backtest report](#the-backtest-report)
@@ -50,10 +53,14 @@ tuned outside of `configs/local.yaml` / `src/quantloom/config/default.yaml`.
 
 - **Ticker universe construction** — resolves the *N* largest US-listed companies by market
   capitalization directly from the SEC's own `company_tickers.json`, with no API key and no HTML
-  scraping required.
+  scraping required, deduplicated, and requested with a descriptive `User-Agent` (overridable via
+  the `SEC_USER_AGENT` environment variable) in line with the SEC's fair-access policy for
+  automated requests.
 - **Historical market data ingestion** — pulls real OHLCV bars from Alpaca's Market Data API
   (IEX feed), from 1-minute up to 3-month candles, with chunked, retrying, sequential downloads
-  into a per-ticker Parquet store.
+  into a per-ticker Parquet store. A chunk that fails (a 429, a dropped connection, ...) is
+  retried with **exponential backoff plus jitter** — see
+  [Retry behavior and exponential backoff](#retry-behavior-and-exponential-backoff).
 - **Technical indicators** — RSI, the Stochastic oscillator (%K/%D, with independent fast/slow
   smoothing windows), rolling realized volatility, and TA-Lib candlestick reversal pattern
   recognition (hammer, engulfing, morning/evening star, three white soldiers/black crows).
@@ -98,6 +105,16 @@ tuned outside of `configs/local.yaml` / `src/quantloom/config/default.yaml`.
   fails immediately at load time, never mid-run. **Every hyperparameter in this project is
   explained in depth in [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md)** — this README covers the
   concepts; that document is the exhaustive reference.
+- **Structured logging throughout** — every module logs through the standard library's `logging`
+  (never `print()`), configured once at the CLI entry point (`logging_utils.configure_logging`)
+  with timestamped, leveled, module-qualified output to stdout — retries, skipped tickers, grid
+  progress, and truncated-universe warnings are all visible in real time as the pipeline runs.
+- **Typed, linted, and tested codebase** — `mypy` (strict-ish: `disallow_untyped_defs`, plus the
+  `pydantic` plugin so validated models type-check precisely) and `ruff` (`E`, `F`, `I`, `UP`, `B`,
+  `SIM` rule sets) both run over the entire `src/` tree, `black` enforces formatting, and a
+  `pytest`/`pytest-cov` suite carries one test file per pipeline module (see
+  [File organization](#file-organization)) — install with `pip install -e ".[dev]"` to get all
+  four.
 
 ---
 
@@ -376,6 +393,77 @@ a fine candle length is a genuinely slow, one-time cost (see `stock_number`'s fi
 `schema.py` for a concrete time budget). If you point `data_dir` at a much larger dataset, redirect
 it off the default `./sample_data` path (e.g. `data_dir: "D:/quant-data/quantloom"`) — the default
 `/data/` tree is gitignored precisely so a large personal download never gets committed.
+
+---
+
+## Retry behavior and exponential backoff
+
+Tickers are downloaded from Alpaca in chunks of `chunk_size` (default **50**) tickers per request,
+strictly sequentially — never concurrently, since concurrent chunk downloads reliably trigger
+Alpaca rate-limiting (its real per-account capacity is tighter in practice than its documented 200
+req/min). When a chunk's request fails outright (an HTTP 429, a dropped connection, a transient
+5xx, or any other exception) it is retried up to `max_retries` times (default **5**) rather than
+immediately giving up on — and silently dropping — every ticker in that chunk.
+
+Each retry waits **exponentially longer than the last, plus random jitter**, rather than a fixed or
+linearly-increasing delay:
+
+```text
+backoff = retry_backoff_seconds * 2 ** (attempt - 1)
+sleep   = backoff + random.uniform(0, backoff * 0.5)
+```
+
+With the defaults (`retry_backoff_seconds = 5.0`), that's a base delay of **5s, 10s, 20s, 40s**
+before the 2nd through 5th attempts (attempt 1 fires immediately), each additionally inflated by up
+to 50% of jitter — e.g. the 3rd attempt sleeps somewhere between 20s and 30s, not exactly 20s.
+Two things this is deliberately doing:
+
+- **Exponential, not linear or fixed, growth** — a transient failure (a rate limit, a momentarily
+  dropped connection) can easily outlast a short fixed delay; growing the wait geometrically gives
+  a slow API/network hiccup room to actually clear, without hammering an already-rate-limiting
+  endpoint at a constant cadence.
+- **Jitter** — without it, a batch of chunks that all failed for the same underlying reason (e.g. a
+  broad rate-limit window) would all retry at exactly the same synchronized instant, immediately
+  re-triggering the same limit; randomizing each chunk's wait spreads retries out instead.
+
+A chunk that still fails after `max_retries` attempts is logged (`"Giving up on chunk after %d
+attempts"`) and skipped entirely — every ticker in that chunk is silently absent from the run
+rather than crashing the whole ingestion (see `data/ingest.py`'s module docstring). `chunk_size`,
+`max_retries`, and `retry_backoff_seconds` are keyword arguments on `ingest()` with the defaults
+above; they are not currently exposed as `Config`/YAML fields, so changing them today means calling
+`ingest()` directly rather than editing `configs/local.yaml`.
+
+---
+
+## Logging
+
+Every module logs through the standard library's `logging` module (`logging.getLogger(__name__)`)
+rather than `print()`, so output is filterable by level and traceable back to the module that
+emitted it. `quantloom.logging_utils.configure_logging()` is called exactly once, at the CLI entry
+point (`main()`), configuring the root logger with a timestamped, leveled, module-qualified format
+(`%(asctime)s %(levelname)-8s %(name)s: %(message)s`) to stdout at `INFO` level by default. In
+practice this is what surfaces, live, while a run is in progress: each chunk retry and its backoff
+attempt count, tickers skipped for missing data, grid-search combinations completing
+(`"grid combination %d/%d complete"`), and universe tickers missing from the local store.
+
+---
+
+## Development: type checking, linting, and tests
+
+Installing with `pip install -e ".[dev]"` pulls in the full code-quality stack this project is
+built against:
+
+- **`mypy`**, configured close to strict (`disallow_untyped_defs`, `warn_unused_ignores`,
+  `warn_redundant_casts`), plus the `pydantic` mypy plugin so validated config models type-check
+  against their actual field types rather than a generic fallback.
+- **`ruff`**, with the `E` (pycodestyle errors), `F` (pyflakes), `I` (import sorting), `UP`
+  (pyupgrade), `B` (bugbear), and `SIM` (simplification) rule sets enabled over the whole `src/`
+  tree.
+- **`black`**, enforcing consistent formatting at a 100-column line length (matching `ruff`'s
+  configured `line-length`).
+- **`pytest` + `pytest-cov`**, with one test file per pipeline module (`tests/test_*.py` — see
+  [File organization](#file-organization)) covering config validation, every indicator/signal/
+  strategy stage, the backtest engine and metrics, ingestion, and both reporting paths.
 
 ---
 
